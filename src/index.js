@@ -242,8 +242,8 @@ app.get('/metrics/failures', (req, res) => {
 // Test outbound connectivity
 app.get('/test-outbound', async (req, res) => {
   const net = require('net');
-  const dgram = require('dgram');
   const https = require('https');
+  const http = require('http');
   const dns = require('dns').promises;
 
   const results = {
@@ -251,22 +251,34 @@ app.get('/test-outbound', async (req, res) => {
     tests: []
   };
 
+  const TIMEOUT = 3000; // 3 second timeout
+
+  // Helper for TCP tests
+  const testTcp = (host, port) => new Promise((resolve, reject) => {
+    const socket = net.createConnection({ host, port, timeout: TIMEOUT });
+    socket.on('connect', () => { socket.destroy(); resolve(true); });
+    socket.on('error', (e) => { socket.destroy(); reject(e); });
+    socket.on('timeout', () => { socket.destroy(); reject(new Error('timeout')); });
+  });
+
   // Test 1: HTTPS (TCP 443)
   try {
     const start = Date.now();
     await new Promise((resolve, reject) => {
-      https.get('https://httpbin.org/ip', (res) => {
+      const req = https.get('https://api.ipify.org?format=json', { timeout: TIMEOUT }, (res) => {
         let data = '';
         res.on('data', chunk => data += chunk);
-        res.on('end', () => resolve(JSON.parse(data)));
-      }).on('error', reject);
+        res.on('end', () => resolve(data));
+      });
+      req.on('error', reject);
+      req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
     });
-    results.tests.push({ test: 'HTTPS (TCP 443)', target: 'httpbin.org', status: 'OK', latencyMs: Date.now() - start });
+    results.tests.push({ test: 'HTTPS (TCP 443)', target: 'api.ipify.org', status: 'OK', latencyMs: Date.now() - start });
   } catch (e) {
-    results.tests.push({ test: 'HTTPS (TCP 443)', target: 'httpbin.org', status: 'FAILED', error: e.message });
+    results.tests.push({ test: 'HTTPS (TCP 443)', target: 'api.ipify.org', status: 'FAILED', error: e.message });
   }
 
-  // Test 2: DNS (UDP 53)
+  // Test 2: DNS resolution (UDP 53)
   try {
     const start = Date.now();
     const addresses = await dns.resolve4('google.com');
@@ -275,76 +287,68 @@ app.get('/test-outbound', async (req, res) => {
     results.tests.push({ test: 'DNS (UDP 53)', target: 'google.com', status: 'FAILED', error: e.message });
   }
 
-  // Test 3: TCP to non-standard port (Redis default port 6379)
+  // Test 3: HTTP (TCP 80)
   try {
     const start = Date.now();
     await new Promise((resolve, reject) => {
-      const socket = net.createConnection({ host: 'portquiz.net', port: 6379, timeout: 5000 });
-      socket.on('connect', () => { socket.destroy(); resolve(); });
-      socket.on('error', reject);
-      socket.on('timeout', () => { socket.destroy(); reject(new Error('timeout')); });
-    });
-    results.tests.push({ test: 'TCP 6379', target: 'portquiz.net:6379', status: 'OK', latencyMs: Date.now() - start });
-  } catch (e) {
-    results.tests.push({ test: 'TCP 6379', target: 'portquiz.net:6379', status: 'FAILED', error: e.message });
-  }
-
-  // Test 4: TCP to SMTP port (25)
-  try {
-    const start = Date.now();
-    await new Promise((resolve, reject) => {
-      const socket = net.createConnection({ host: 'portquiz.net', port: 25, timeout: 5000 });
-      socket.on('connect', () => { socket.destroy(); resolve(); });
-      socket.on('error', reject);
-      socket.on('timeout', () => { socket.destroy(); reject(new Error('timeout')); });
-    });
-    results.tests.push({ test: 'TCP 25 (SMTP)', target: 'portquiz.net:25', status: 'OK', latencyMs: Date.now() - start });
-  } catch (e) {
-    results.tests.push({ test: 'TCP 25 (SMTP)', target: 'portquiz.net:25', status: 'FAILED', error: e.message });
-  }
-
-  // Test 5: TCP to SSH port (22)
-  try {
-    const start = Date.now();
-    await new Promise((resolve, reject) => {
-      const socket = net.createConnection({ host: 'portquiz.net', port: 22, timeout: 5000 });
-      socket.on('connect', () => { socket.destroy(); resolve(); });
-      socket.on('error', reject);
-      socket.on('timeout', () => { socket.destroy(); reject(new Error('timeout')); });
-    });
-    results.tests.push({ test: 'TCP 22 (SSH)', target: 'portquiz.net:22', status: 'OK', latencyMs: Date.now() - start });
-  } catch (e) {
-    results.tests.push({ test: 'TCP 22 (SSH)', target: 'portquiz.net:22', status: 'FAILED', error: e.message });
-  }
-
-  // Test 6: TCP to high port (8080)
-  try {
-    const start = Date.now();
-    await new Promise((resolve, reject) => {
-      const socket = net.createConnection({ host: 'portquiz.net', port: 8080, timeout: 5000 });
-      socket.on('connect', () => { socket.destroy(); resolve(); });
-      socket.on('error', reject);
-      socket.on('timeout', () => { socket.destroy(); reject(new Error('timeout')); });
-    });
-    results.tests.push({ test: 'TCP 8080', target: 'portquiz.net:8080', status: 'OK', latencyMs: Date.now() - start });
-  } catch (e) {
-    results.tests.push({ test: 'TCP 8080', target: 'portquiz.net:8080', status: 'FAILED', error: e.message });
-  }
-
-  // Test 7: UDP to custom port (using DNS as proxy test)
-  try {
-    const start = Date.now();
-    await new Promise((resolve, reject) => {
-      const resolver = new dns.Resolver();
-      resolver.setServers(['8.8.8.8']); // Google DNS
-      resolver.resolve4('example.com', (err, addresses) => {
-        if (err) reject(err);
-        else resolve(addresses);
+      const req = http.get('http://httpbin.org/ip', { timeout: TIMEOUT }, (res) => {
+        let data = '';
+        res.on('data', chunk => data += chunk);
+        res.on('end', () => resolve(data));
       });
+      req.on('error', reject);
+      req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
     });
-    results.tests.push({ test: 'UDP to 8.8.8.8:53', target: 'Google DNS', status: 'OK', latencyMs: Date.now() - start });
+    results.tests.push({ test: 'HTTP (TCP 80)', target: 'httpbin.org', status: 'OK', latencyMs: Date.now() - start });
   } catch (e) {
-    results.tests.push({ test: 'UDP to 8.8.8.8:53', target: 'Google DNS', status: 'FAILED', error: e.message });
+    results.tests.push({ test: 'HTTP (TCP 80)', target: 'httpbin.org', status: 'FAILED', error: e.message });
+  }
+
+  // Test 4: PostgreSQL port (TCP 5432) - to a known server
+  try {
+    const start = Date.now();
+    await testTcp('db.fauna.com', 5432);
+    results.tests.push({ test: 'TCP 5432 (Postgres)', target: 'db.fauna.com:5432', status: 'OK', latencyMs: Date.now() - start });
+  } catch (e) {
+    results.tests.push({ test: 'TCP 5432 (Postgres)', target: 'db.fauna.com:5432', status: 'FAILED', error: e.message });
+  }
+
+  // Test 5: Redis port (TCP 6379) - to upstash
+  try {
+    const start = Date.now();
+    await testTcp('global-helping-orca-30622.upstash.io', 6379);
+    results.tests.push({ test: 'TCP 6379 (Redis)', target: 'upstash.io:6379', status: 'OK', latencyMs: Date.now() - start });
+  } catch (e) {
+    results.tests.push({ test: 'TCP 6379 (Redis)', target: 'upstash.io:6379', status: 'FAILED', error: e.message });
+  }
+
+  // Test 6: MongoDB port (TCP 27017) - to MongoDB Atlas
+  try {
+    const start = Date.now();
+    await testTcp('cluster0.mongodb.net', 27017);
+    results.tests.push({ test: 'TCP 27017 (MongoDB)', target: 'mongodb.net:27017', status: 'OK', latencyMs: Date.now() - start });
+  } catch (e) {
+    results.tests.push({ test: 'TCP 27017 (MongoDB)', target: 'mongodb.net:27017', status: 'FAILED', error: e.message });
+  }
+
+  // Test 7: Custom DNS server (UDP)
+  try {
+    const start = Date.now();
+    const resolver = new dns.Resolver();
+    resolver.setServers(['8.8.8.8']);
+    await resolver.resolve4('example.com');
+    results.tests.push({ test: 'UDP 53 to 8.8.8.8', target: 'Google DNS', status: 'OK', latencyMs: Date.now() - start });
+  } catch (e) {
+    results.tests.push({ test: 'UDP 53 to 8.8.8.8', target: 'Google DNS', status: 'FAILED', error: e.message });
+  }
+
+  // Test 8: MySQL port (TCP 3306)
+  try {
+    const start = Date.now();
+    await testTcp('mysql.ewr1.psdb.cloud', 3306);
+    results.tests.push({ test: 'TCP 3306 (MySQL)', target: 'planetscale:3306', status: 'OK', latencyMs: Date.now() - start });
+  } catch (e) {
+    results.tests.push({ test: 'TCP 3306 (MySQL)', target: 'planetscale:3306', status: 'FAILED', error: e.message });
   }
 
   // Summary
