@@ -92,9 +92,14 @@ async function measureLatency() {
   const start = process.hrtime.bigint();
 
   try {
+    // Parse the URL and ensure SSL is configured correctly
+    // Remove sslmode from URL and configure SSL explicitly
+    const dbUrl = DATABASE_URL.replace(/[?&]sslmode=[^&]*/g, '');
     const client = new Client({
-      connectionString: DATABASE_URL,
-      ssl: { rejectUnauthorized: false }
+      connectionString: dbUrl,
+      ssl: {
+        rejectUnauthorized: false,  // Accept DO's private CA
+      }
     });
 
     await client.connect();
