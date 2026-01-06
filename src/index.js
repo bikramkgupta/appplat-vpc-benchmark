@@ -38,8 +38,20 @@ function calculateStats() {
   }
 
   const connectLatencies = successful.map(r => r.connectLatencyMs);
+  const pingLatencies = successful.map(r => r.pingLatencyMs).filter(v => v !== undefined);
+  const longQueryLatencies = successful.map(r => r.longQueryLatencyMs).filter(v => v !== undefined);
+  const avgRoundTrips = successful.map(r => r.avgRoundTripMs).filter(v => v !== undefined);
   const queryLatencies = successful.map(r => r.queryLatencyMs);
   const totalLatencies = successful.map(r => r.totalLatencyMs);
+
+  const calcStats = (arr) => ({
+    min: Math.min(...arr).toFixed(2),
+    max: Math.max(...arr).toFixed(2),
+    avg: (arr.reduce((a, b) => a + b, 0) / arr.length).toFixed(2),
+    p50: percentile(arr, 50).toFixed(2),
+    p95: percentile(arr, 95).toFixed(2),
+    p99: percentile(arr, 99).toFixed(2)
+  });
 
   return {
     appType: APP_TYPE,
@@ -48,30 +60,12 @@ function calculateStats() {
     failedMeasurements: failed.length,
     failureRate: (failed.length / results.length * 100).toFixed(2) + '%',
     latency: {
-      connect: {
-        min: Math.min(...connectLatencies).toFixed(2),
-        max: Math.max(...connectLatencies).toFixed(2),
-        avg: (connectLatencies.reduce((a, b) => a + b, 0) / connectLatencies.length).toFixed(2),
-        p50: percentile(connectLatencies, 50).toFixed(2),
-        p95: percentile(connectLatencies, 95).toFixed(2),
-        p99: percentile(connectLatencies, 99).toFixed(2)
-      },
-      query: {
-        min: Math.min(...queryLatencies).toFixed(2),
-        max: Math.max(...queryLatencies).toFixed(2),
-        avg: (queryLatencies.reduce((a, b) => a + b, 0) / queryLatencies.length).toFixed(2),
-        p50: percentile(queryLatencies, 50).toFixed(2),
-        p95: percentile(queryLatencies, 95).toFixed(2),
-        p99: percentile(queryLatencies, 99).toFixed(2)
-      },
-      total: {
-        min: Math.min(...totalLatencies).toFixed(2),
-        max: Math.max(...totalLatencies).toFixed(2),
-        avg: (totalLatencies.reduce((a, b) => a + b, 0) / totalLatencies.length).toFixed(2),
-        p50: percentile(totalLatencies, 50).toFixed(2),
-        p95: percentile(totalLatencies, 95).toFixed(2),
-        p99: percentile(totalLatencies, 99).toFixed(2)
-      }
+      connect: calcStats(connectLatencies),
+      ping: pingLatencies.length > 0 ? calcStats(pingLatencies) : null,
+      longQuery: longQueryLatencies.length > 0 ? calcStats(longQueryLatencies) : null,
+      avgRoundTrip: avgRoundTrips.length > 0 ? calcStats(avgRoundTrips) : null,
+      query: calcStats(queryLatencies),
+      total: calcStats(totalLatencies)
     },
     uptime: getUptime(),
     startTime: startTime.toISOString()
@@ -105,22 +99,48 @@ async function measureLatency() {
     await client.connect();
     const connectTime = process.hrtime.bigint();
 
+    // Run a simple ping query
     await client.query('SELECT 1');
-    const queryTime = process.hrtime.bigint();
+    const pingTime = process.hrtime.bigint();
+
+    // Run a longer query that generates and returns data
+    // This better shows network throughput differences
+    const longQuery = `
+      SELECT
+        gs.id,
+        md5(random()::text) as hash1,
+        md5(random()::text) as hash2,
+        md5(random()::text) as hash3,
+        now() as timestamp
+      FROM generate_series(1, 1000) as gs(id)
+    `;
+    const queryResult = await client.query(longQuery);
+    const longQueryTime = process.hrtime.bigint();
+
+    // Run multiple round trips to measure sustained latency
+    for (let i = 0; i < 10; i++) {
+      await client.query('SELECT $1::int', [i]);
+    }
+    const multiRoundTripTime = process.hrtime.bigint();
 
     await client.end();
 
-    const result = {
+    const measurement = {
       timestamp: new Date().toISOString(),
       connectLatencyMs: Number(connectTime - start) / 1e6,
-      queryLatencyMs: Number(queryTime - connectTime) / 1e6,
-      totalLatencyMs: Number(queryTime - start) / 1e6,
+      pingLatencyMs: Number(pingTime - connectTime) / 1e6,
+      longQueryLatencyMs: Number(longQueryTime - pingTime) / 1e6,
+      longQueryRows: queryResult.rowCount,
+      multiRoundTripLatencyMs: Number(multiRoundTripTime - longQueryTime) / 1e6,
+      avgRoundTripMs: Number(multiRoundTripTime - longQueryTime) / 1e6 / 10,
+      queryLatencyMs: Number(multiRoundTripTime - connectTime) / 1e6,  // Total query time
+      totalLatencyMs: Number(multiRoundTripTime - start) / 1e6,
       success: true
     };
 
-    console.log(`[${APP_TYPE}] Benchmark: connect=${result.connectLatencyMs.toFixed(2)}ms, query=${result.queryLatencyMs.toFixed(2)}ms, total=${result.totalLatencyMs.toFixed(2)}ms`);
+    console.log(`[${APP_TYPE}] Benchmark: connect=${measurement.connectLatencyMs.toFixed(2)}ms, ping=${measurement.pingLatencyMs.toFixed(2)}ms, longQuery=${measurement.longQueryLatencyMs.toFixed(2)}ms (${measurement.longQueryRows} rows), 10x roundtrip=${measurement.multiRoundTripLatencyMs.toFixed(2)}ms (avg ${measurement.avgRoundTripMs.toFixed(2)}ms), total=${measurement.totalLatencyMs.toFixed(2)}ms`);
 
-    return result;
+    return measurement;
   } catch (error) {
     const result = {
       timestamp: new Date().toISOString(),
@@ -176,30 +196,24 @@ app.get('/metrics/summary', (req, res) => {
   text += `Failed: ${stats.failedMeasurements}\n`;
   text += `Failure Rate: ${stats.failureRate}\n\n`;
 
+  const formatLatency = (name, data) => {
+    if (!data) return '';
+    return `--- ${name} ---\n` +
+      `  Min: ${data.min} ms\n` +
+      `  Max: ${data.max} ms\n` +
+      `  Avg: ${data.avg} ms\n` +
+      `  P50: ${data.p50} ms\n` +
+      `  P95: ${data.p95} ms\n` +
+      `  P99: ${data.p99} ms\n\n`;
+  };
+
   if (stats.latency) {
-    text += `--- Total Latency (Connect + Query) ---\n`;
-    text += `  Min: ${stats.latency.total.min} ms\n`;
-    text += `  Max: ${stats.latency.total.max} ms\n`;
-    text += `  Avg: ${stats.latency.total.avg} ms\n`;
-    text += `  P50: ${stats.latency.total.p50} ms\n`;
-    text += `  P95: ${stats.latency.total.p95} ms\n`;
-    text += `  P99: ${stats.latency.total.p99} ms\n\n`;
-
-    text += `--- Connect Latency ---\n`;
-    text += `  Min: ${stats.latency.connect.min} ms\n`;
-    text += `  Max: ${stats.latency.connect.max} ms\n`;
-    text += `  Avg: ${stats.latency.connect.avg} ms\n`;
-    text += `  P50: ${stats.latency.connect.p50} ms\n`;
-    text += `  P95: ${stats.latency.connect.p95} ms\n`;
-    text += `  P99: ${stats.latency.connect.p99} ms\n\n`;
-
-    text += `--- Query Latency ---\n`;
-    text += `  Min: ${stats.latency.query.min} ms\n`;
-    text += `  Max: ${stats.latency.query.max} ms\n`;
-    text += `  Avg: ${stats.latency.query.avg} ms\n`;
-    text += `  P50: ${stats.latency.query.p50} ms\n`;
-    text += `  P95: ${stats.latency.query.p95} ms\n`;
-    text += `  P99: ${stats.latency.query.p99} ms\n`;
+    text += formatLatency('Connect Latency', stats.latency.connect);
+    text += formatLatency('Ping (SELECT 1)', stats.latency.ping);
+    text += formatLatency('Long Query (1000 rows)', stats.latency.longQuery);
+    text += formatLatency('Avg Round Trip (10x queries)', stats.latency.avgRoundTrip);
+    text += formatLatency('Total Query Time', stats.latency.query);
+    text += formatLatency('Total (Connect + All Queries)', stats.latency.total);
   } else {
     text += `No successful measurements yet.\n`;
   }
