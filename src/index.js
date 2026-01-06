@@ -239,6 +239,122 @@ app.get('/metrics/failures', (req, res) => {
   });
 });
 
+// Test outbound connectivity
+app.get('/test-outbound', async (req, res) => {
+  const net = require('net');
+  const dgram = require('dgram');
+  const https = require('https');
+  const dns = require('dns').promises;
+
+  const results = {
+    timestamp: new Date().toISOString(),
+    tests: []
+  };
+
+  // Test 1: HTTPS (TCP 443)
+  try {
+    const start = Date.now();
+    await new Promise((resolve, reject) => {
+      https.get('https://httpbin.org/ip', (res) => {
+        let data = '';
+        res.on('data', chunk => data += chunk);
+        res.on('end', () => resolve(JSON.parse(data)));
+      }).on('error', reject);
+    });
+    results.tests.push({ test: 'HTTPS (TCP 443)', target: 'httpbin.org', status: 'OK', latencyMs: Date.now() - start });
+  } catch (e) {
+    results.tests.push({ test: 'HTTPS (TCP 443)', target: 'httpbin.org', status: 'FAILED', error: e.message });
+  }
+
+  // Test 2: DNS (UDP 53)
+  try {
+    const start = Date.now();
+    const addresses = await dns.resolve4('google.com');
+    results.tests.push({ test: 'DNS (UDP 53)', target: 'google.com', status: 'OK', result: addresses, latencyMs: Date.now() - start });
+  } catch (e) {
+    results.tests.push({ test: 'DNS (UDP 53)', target: 'google.com', status: 'FAILED', error: e.message });
+  }
+
+  // Test 3: TCP to non-standard port (Redis default port 6379)
+  try {
+    const start = Date.now();
+    await new Promise((resolve, reject) => {
+      const socket = net.createConnection({ host: 'portquiz.net', port: 6379, timeout: 5000 });
+      socket.on('connect', () => { socket.destroy(); resolve(); });
+      socket.on('error', reject);
+      socket.on('timeout', () => { socket.destroy(); reject(new Error('timeout')); });
+    });
+    results.tests.push({ test: 'TCP 6379', target: 'portquiz.net:6379', status: 'OK', latencyMs: Date.now() - start });
+  } catch (e) {
+    results.tests.push({ test: 'TCP 6379', target: 'portquiz.net:6379', status: 'FAILED', error: e.message });
+  }
+
+  // Test 4: TCP to SMTP port (25)
+  try {
+    const start = Date.now();
+    await new Promise((resolve, reject) => {
+      const socket = net.createConnection({ host: 'portquiz.net', port: 25, timeout: 5000 });
+      socket.on('connect', () => { socket.destroy(); resolve(); });
+      socket.on('error', reject);
+      socket.on('timeout', () => { socket.destroy(); reject(new Error('timeout')); });
+    });
+    results.tests.push({ test: 'TCP 25 (SMTP)', target: 'portquiz.net:25', status: 'OK', latencyMs: Date.now() - start });
+  } catch (e) {
+    results.tests.push({ test: 'TCP 25 (SMTP)', target: 'portquiz.net:25', status: 'FAILED', error: e.message });
+  }
+
+  // Test 5: TCP to SSH port (22)
+  try {
+    const start = Date.now();
+    await new Promise((resolve, reject) => {
+      const socket = net.createConnection({ host: 'portquiz.net', port: 22, timeout: 5000 });
+      socket.on('connect', () => { socket.destroy(); resolve(); });
+      socket.on('error', reject);
+      socket.on('timeout', () => { socket.destroy(); reject(new Error('timeout')); });
+    });
+    results.tests.push({ test: 'TCP 22 (SSH)', target: 'portquiz.net:22', status: 'OK', latencyMs: Date.now() - start });
+  } catch (e) {
+    results.tests.push({ test: 'TCP 22 (SSH)', target: 'portquiz.net:22', status: 'FAILED', error: e.message });
+  }
+
+  // Test 6: TCP to high port (8080)
+  try {
+    const start = Date.now();
+    await new Promise((resolve, reject) => {
+      const socket = net.createConnection({ host: 'portquiz.net', port: 8080, timeout: 5000 });
+      socket.on('connect', () => { socket.destroy(); resolve(); });
+      socket.on('error', reject);
+      socket.on('timeout', () => { socket.destroy(); reject(new Error('timeout')); });
+    });
+    results.tests.push({ test: 'TCP 8080', target: 'portquiz.net:8080', status: 'OK', latencyMs: Date.now() - start });
+  } catch (e) {
+    results.tests.push({ test: 'TCP 8080', target: 'portquiz.net:8080', status: 'FAILED', error: e.message });
+  }
+
+  // Test 7: UDP to custom port (using DNS as proxy test)
+  try {
+    const start = Date.now();
+    await new Promise((resolve, reject) => {
+      const resolver = new dns.Resolver();
+      resolver.setServers(['8.8.8.8']); // Google DNS
+      resolver.resolve4('example.com', (err, addresses) => {
+        if (err) reject(err);
+        else resolve(addresses);
+      });
+    });
+    results.tests.push({ test: 'UDP to 8.8.8.8:53', target: 'Google DNS', status: 'OK', latencyMs: Date.now() - start });
+  } catch (e) {
+    results.tests.push({ test: 'UDP to 8.8.8.8:53', target: 'Google DNS', status: 'FAILED', error: e.message });
+  }
+
+  // Summary
+  const passed = results.tests.filter(t => t.status === 'OK').length;
+  const failed = results.tests.filter(t => t.status === 'FAILED').length;
+  results.summary = { passed, failed, total: results.tests.length };
+
+  res.json(results);
+});
+
 // Start server
 app.listen(PORT, () => {
   console.log(`[${APP_TYPE}] Server running on port ${PORT}`);
