@@ -304,34 +304,34 @@ app.get('/test-outbound', async (req, res) => {
     results.tests.push({ test: 'HTTP (TCP 80)', target: 'httpbin.org', status: 'FAILED', error: e.message });
   }
 
-  // Test 4: PostgreSQL port (TCP 5432) - to a known server
+  // Test 4: SSH port (TCP 22) - to github.com
   try {
     const start = Date.now();
-    await testTcp('db.fauna.com', 5432);
-    results.tests.push({ test: 'TCP 5432 (Postgres)', target: 'db.fauna.com:5432', status: 'OK', latencyMs: Date.now() - start });
+    await testTcp('github.com', 22);
+    results.tests.push({ test: 'TCP 22 (SSH)', target: 'github.com:22', status: 'OK', latencyMs: Date.now() - start });
   } catch (e) {
-    results.tests.push({ test: 'TCP 5432 (Postgres)', target: 'db.fauna.com:5432', status: 'FAILED', error: e.message });
+    results.tests.push({ test: 'TCP 22 (SSH)', target: 'github.com:22', status: 'FAILED', error: e.message });
   }
 
-  // Test 5: Redis port (TCP 6379) - to upstash
+  // Test 5: PostgreSQL port (TCP 5432) - to our own DB
   try {
     const start = Date.now();
-    await testTcp('global-helping-orca-30622.upstash.io', 6379);
-    results.tests.push({ test: 'TCP 6379 (Redis)', target: 'upstash.io:6379', status: 'OK', latencyMs: Date.now() - start });
+    await testTcp('vpc-benchmark-db-do-user-8198484-0.k.db.ondigitalocean.com', 25060);
+    results.tests.push({ test: 'TCP 25060 (DO Postgres)', target: 'vpc-benchmark-db', status: 'OK', latencyMs: Date.now() - start });
   } catch (e) {
-    results.tests.push({ test: 'TCP 6379 (Redis)', target: 'upstash.io:6379', status: 'FAILED', error: e.message });
+    results.tests.push({ test: 'TCP 25060 (DO Postgres)', target: 'vpc-benchmark-db', status: 'FAILED', error: e.message });
   }
 
-  // Test 6: MongoDB port (TCP 27017) - to MongoDB Atlas
+  // Test 6: SMTP port (TCP 587) - to gmail
   try {
     const start = Date.now();
-    await testTcp('cluster0.mongodb.net', 27017);
-    results.tests.push({ test: 'TCP 27017 (MongoDB)', target: 'mongodb.net:27017', status: 'OK', latencyMs: Date.now() - start });
+    await testTcp('smtp.gmail.com', 587);
+    results.tests.push({ test: 'TCP 587 (SMTP)', target: 'smtp.gmail.com:587', status: 'OK', latencyMs: Date.now() - start });
   } catch (e) {
-    results.tests.push({ test: 'TCP 27017 (MongoDB)', target: 'mongodb.net:27017', status: 'FAILED', error: e.message });
+    results.tests.push({ test: 'TCP 587 (SMTP)', target: 'smtp.gmail.com:587', status: 'FAILED', error: e.message });
   }
 
-  // Test 7: Custom DNS server (UDP)
+  // Test 7: Custom DNS server (UDP 53)
   try {
     const start = Date.now();
     const resolver = new dns.Resolver();
@@ -342,13 +342,22 @@ app.get('/test-outbound', async (req, res) => {
     results.tests.push({ test: 'UDP 53 to 8.8.8.8', target: 'Google DNS', status: 'FAILED', error: e.message });
   }
 
-  // Test 8: MySQL port (TCP 3306)
+  // Test 8: High port (TCP 8443) - common alternate HTTPS
   try {
     const start = Date.now();
-    await testTcp('mysql.ewr1.psdb.cloud', 3306);
-    results.tests.push({ test: 'TCP 3306 (MySQL)', target: 'planetscale:3306', status: 'OK', latencyMs: Date.now() - start });
+    await testTcp('www.cloudflare.com', 8443);
+    results.tests.push({ test: 'TCP 8443', target: 'cloudflare.com:8443', status: 'OK', latencyMs: Date.now() - start });
   } catch (e) {
-    results.tests.push({ test: 'TCP 3306 (MySQL)', target: 'planetscale:3306', status: 'FAILED', error: e.message });
+    results.tests.push({ test: 'TCP 8443', target: 'cloudflare.com:8443', status: 'FAILED', error: e.message });
+  }
+
+  // Test 9: FTP port (TCP 21)
+  try {
+    const start = Date.now();
+    await testTcp('ftp.debian.org', 21);
+    results.tests.push({ test: 'TCP 21 (FTP)', target: 'ftp.debian.org:21', status: 'OK', latencyMs: Date.now() - start });
+  } catch (e) {
+    results.tests.push({ test: 'TCP 21 (FTP)', target: 'ftp.debian.org:21', status: 'FAILED', error: e.message });
   }
 
   // Summary
