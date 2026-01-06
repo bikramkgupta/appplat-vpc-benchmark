@@ -360,6 +360,137 @@ app.get('/test-outbound', async (req, res) => {
     results.tests.push({ test: 'TCP 21 (FTP)', target: 'ftp.debian.org:21', status: 'FAILED', error: e.message });
   }
 
+  // ===== UDP Video/WebRTC Tests =====
+  const dgram = require('dgram');
+
+  // Helper for UDP STUN test (STUN binding request)
+  const testStunUdp = (host, port) => new Promise((resolve, reject) => {
+    const socket = dgram.createSocket('udp4');
+    const timeout = setTimeout(() => {
+      socket.close();
+      reject(new Error('timeout'));
+    }, TIMEOUT);
+
+    // STUN Binding Request (simplified)
+    // Message Type: 0x0001 (Binding Request)
+    // Magic Cookie: 0x2112A442
+    // Transaction ID: random 12 bytes
+    const stunRequest = Buffer.alloc(20);
+    stunRequest.writeUInt16BE(0x0001, 0);  // Message Type
+    stunRequest.writeUInt16BE(0x0000, 2);  // Message Length
+    stunRequest.writeUInt32BE(0x2112A442, 4);  // Magic Cookie
+    // Transaction ID (random)
+    for (let i = 8; i < 20; i++) {
+      stunRequest[i] = Math.floor(Math.random() * 256);
+    }
+
+    socket.on('message', (msg) => {
+      clearTimeout(timeout);
+      socket.close();
+      // Check if it's a STUN response (0x0101 = Binding Success Response)
+      if (msg.length >= 20 && msg.readUInt16BE(0) === 0x0101) {
+        resolve({ type: 'STUN_RESPONSE', size: msg.length });
+      } else {
+        resolve({ type: 'UDP_RESPONSE', size: msg.length });
+      }
+    });
+
+    socket.on('error', (err) => {
+      clearTimeout(timeout);
+      socket.close();
+      reject(err);
+    });
+
+    socket.send(stunRequest, port, host);
+  });
+
+  // Test 10: STUN (UDP 3478) - Standard STUN port
+  try {
+    const start = Date.now();
+    const response = await testStunUdp('stun.l.google.com', 19302);
+    results.tests.push({ test: 'UDP 19302 (STUN)', target: 'stun.l.google.com:19302', status: 'OK', response: response.type, latencyMs: Date.now() - start });
+  } catch (e) {
+    results.tests.push({ test: 'UDP 19302 (STUN)', target: 'stun.l.google.com:19302', status: 'FAILED', error: e.message });
+  }
+
+  // Test 11: STUN on standard port 3478
+  try {
+    const start = Date.now();
+    const response = await testStunUdp('stun.stunprotocol.org', 3478);
+    results.tests.push({ test: 'UDP 3478 (STUN)', target: 'stun.stunprotocol.org:3478', status: 'OK', response: response.type, latencyMs: Date.now() - start });
+  } catch (e) {
+    results.tests.push({ test: 'UDP 3478 (STUN)', target: 'stun.stunprotocol.org:3478', status: 'FAILED', error: e.message });
+  }
+
+  // Test 12: Jitsi Meet STUN
+  try {
+    const start = Date.now();
+    const response = await testStunUdp('meet-jit-si-turnrelay.jitsi.net', 443);
+    results.tests.push({ test: 'UDP 443 (Jitsi TURN)', target: 'jitsi.net:443', status: 'OK', response: response.type, latencyMs: Date.now() - start });
+  } catch (e) {
+    results.tests.push({ test: 'UDP 443 (Jitsi TURN)', target: 'jitsi.net:443', status: 'FAILED', error: e.message });
+  }
+
+  // Test 13: UDP high port (WebRTC media range 16384-32768)
+  // Test against Twilio's TURN server
+  try {
+    const start = Date.now();
+    const response = await testStunUdp('global.stun.twilio.com', 3478);
+    results.tests.push({ test: 'UDP 3478 (Twilio STUN)', target: 'twilio.com:3478', status: 'OK', response: response.type, latencyMs: Date.now() - start });
+  } catch (e) {
+    results.tests.push({ test: 'UDP 3478 (Twilio STUN)', target: 'twilio.com:3478', status: 'FAILED', error: e.message });
+  }
+
+  // Test 14: TURN over UDP 443 (common for restrictive firewalls)
+  try {
+    const start = Date.now();
+    const response = await testStunUdp('stun.l.google.com', 19305);
+    results.tests.push({ test: 'UDP 19305 (Google STUN alt)', target: 'stun.l.google.com:19305', status: 'OK', response: response.type, latencyMs: Date.now() - start });
+  } catch (e) {
+    results.tests.push({ test: 'UDP 19305 (Google STUN alt)', target: 'stun.l.google.com:19305', status: 'FAILED', error: e.message });
+  }
+
+  // Test 15: Generic UDP test to high port (simulating RTP)
+  const testUdpEcho = (host, port) => new Promise((resolve, reject) => {
+    const socket = dgram.createSocket('udp4');
+    const timeout = setTimeout(() => {
+      socket.close();
+      // For UDP, no response doesn't necessarily mean blocked
+      // The packet might have been sent but no response expected
+      resolve({ sent: true, response: false });
+    }, TIMEOUT);
+
+    socket.on('message', (msg) => {
+      clearTimeout(timeout);
+      socket.close();
+      resolve({ sent: true, response: true, size: msg.length });
+    });
+
+    socket.on('error', (err) => {
+      clearTimeout(timeout);
+      socket.close();
+      reject(err);
+    });
+
+    // Send a test packet
+    socket.send(Buffer.from('test'), port, host);
+  });
+
+  // Test 16: UDP to port 10000 (Jitsi Videobridge default)
+  try {
+    const start = Date.now();
+    const result = await testUdpEcho('meet.jit.si', 10000);
+    results.tests.push({
+      test: 'UDP 10000 (Jitsi JVB)',
+      target: 'meet.jit.si:10000',
+      status: result.sent ? 'SENT' : 'FAILED',
+      note: 'UDP sent successfully (no echo expected)',
+      latencyMs: Date.now() - start
+    });
+  } catch (e) {
+    results.tests.push({ test: 'UDP 10000 (Jitsi JVB)', target: 'meet.jit.si:10000', status: 'FAILED', error: e.message });
+  }
+
   // Summary
   const passed = results.tests.filter(t => t.status === 'OK').length;
   const failed = results.tests.filter(t => t.status === 'FAILED').length;
