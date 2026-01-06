@@ -1,0 +1,37 @@
+name: Deploy to App Platform
+
+on:
+  workflow_dispatch:
+    inputs:
+      app_type:
+        description: 'Which app to deploy'
+        required: true
+        default: 'both'
+        type: choice
+        options:
+          - vpc
+          - public
+          - both
+
+jobs:
+  deploy-vpc:
+    if: ${{ github.event.inputs.app_type == 'vpc' || github.event.inputs.app_type == 'both' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deploy VPC App
+        uses: digitalocean/app_action/deploy@v2
+        with:
+          token: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+          app_name: benchmark-vpc-app
+
+  deploy-public:
+    if: ${{ github.event.inputs.app_type == 'public' || github.event.inputs.app_type == 'both' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deploy Public App
+        uses: digitalocean/app_action/deploy@v2
+        with:
+          token: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+          app_name: benchmark-pub-app

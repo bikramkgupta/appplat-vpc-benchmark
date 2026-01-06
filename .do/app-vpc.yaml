@@ -1,0 +1,20 @@
+name: benchmark-vpc-app
+region: syd
+features:
+  - buildpack-stack=ubuntu-22
+vpc:
+  id: 20ccc9c3-2bad-40dc-9669-8d5ef784b765
+services:
+  - name: api
+    github:
+      repo: bikramkgupta/appplat-vpc-benchmark
+      branch: main
+      deploy_on_push: false
+    http_port: 3000
+    instance_size_slug: apps-s-1vcpu-0.5gb
+    instance_count: 1
+    run_command: npm start
+    envs:
+      - key: APP_TYPE
+        scope: RUN_TIME
+        value: VPC
