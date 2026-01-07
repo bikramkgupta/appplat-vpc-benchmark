@@ -1,11 +1,21 @@
+# Public App Spec Template
+# Deploy with: doctl apps create --spec .do/app-public.yaml
+#
+# Required: Update the following before deployment:
+# - github.repo: Your forked repository
+# - DATABASE_URL: Your PostgreSQL connection string (use public hostname)
+
 name: benchmark-pub-app
-region: syd
+region: syd  # Change to your preferred region
 features:
   - buildpack-stack=ubuntu-22
+
+# No VPC - connects over public internet
+
 services:
   - name: api
     github:
-      repo: bikramkgupta/appplat-vpc-benchmark
+      repo: YOUR_GITHUB_USERNAME/appplat-vpc-benchmark
       branch: main
       deploy_on_push: false
     http_port: 3000
@@ -16,3 +26,15 @@ services:
       - key: APP_TYPE
         scope: RUN_TIME
         value: PUBLIC
+      - key: USE_POOL
+        scope: RUN_TIME
+        value: "true"
+      - key: POOL_SIZE
+        scope: RUN_TIME
+        value: "10"
+      # Use public hostname (no 'private-' prefix)
+      # Format: postgresql://user:pass@<host>:25061/benchmark-pool?sslmode=require
+      - key: DATABASE_URL
+        scope: RUN_TIME
+        type: SECRET
+        value: YOUR_PUBLIC_DATABASE_URL

@@ -1,13 +1,24 @@
+# VPC App Spec Template
+# Deploy with: doctl apps create --spec .do/app-vpc.yaml
+#
+# Required: Update the following before deployment:
+# - vpc.id: Your VPC UUID
+# - github.repo: Your forked repository
+# - DATABASE_URL: Your PostgreSQL connection string (use private hostname)
+
 name: benchmark-vpc-app
-region: syd
+region: syd  # Change to your preferred region
 features:
   - buildpack-stack=ubuntu-22
+
+# VPC Configuration - Required for private database connectivity
 vpc:
-  id: 20ccc9c3-2bad-40dc-9669-8d5ef784b765
+  id: YOUR_VPC_UUID  # Get with: doctl vpcs list
+
 services:
   - name: api
     github:
-      repo: bikramkgupta/appplat-vpc-benchmark
+      repo: YOUR_GITHUB_USERNAME/appplat-vpc-benchmark
       branch: main
       deploy_on_push: false
     http_port: 3000
@@ -18,3 +29,15 @@ services:
       - key: APP_TYPE
         scope: RUN_TIME
         value: VPC
+      - key: USE_POOL
+        scope: RUN_TIME
+        value: "true"
+      - key: POOL_SIZE
+        scope: RUN_TIME
+        value: "10"
+      # Use private hostname for VPC connectivity
+      # Format: postgresql://user:pass@private-<host>:25061/benchmark-pool?sslmode=require
+      - key: DATABASE_URL
+        scope: RUN_TIME
+        type: SECRET
+        value: YOUR_PRIVATE_DATABASE_URL
