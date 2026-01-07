@@ -1,11 +1,30 @@
 const express = require('express');
-const { Client } = require('pg');
+const { Client, Pool } = require('pg');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 const DATABASE_URL = process.env.DATABASE_URL;
 const APP_TYPE = process.env.APP_TYPE || 'UNKNOWN';
 const BENCHMARK_INTERVAL = 45 * 1000; // 45 seconds
+
+// Pool configuration
+const USE_POOL = process.env.USE_POOL === 'true';
+const POOL_SIZE = parseInt(process.env.POOL_SIZE || '10', 10);
+
+// Parse the URL and configure SSL
+const getDbConfig = () => {
+  const dbUrl = DATABASE_URL.replace(/[?&]sslmode=[^&]*/g, '');
+  return {
+    connectionString: dbUrl,
+    ssl: { rejectUnauthorized: false },
+    max: POOL_SIZE,
+    idleTimeoutMillis: 30000,
+    connectionTimeoutMillis: 10000
+  };
+};
+
+// Global pool instance (created once at startup if USE_POOL is true)
+let pool = null;
 
 // Store benchmark results in memory
 const results = [];
@@ -37,12 +56,14 @@ function calculateStats() {
     };
   }
 
-  const connectLatencies = successful.map(r => r.connectLatencyMs);
+  const connectLatencies = successful.map(r => r.connectLatencyMs).filter(v => v !== undefined);
+  const poolAcquireLatencies = successful.map(r => r.poolAcquireMs).filter(v => v !== undefined);
   const pingLatencies = successful.map(r => r.pingLatencyMs).filter(v => v !== undefined);
   const longQueryLatencies = successful.map(r => r.longQueryLatencyMs).filter(v => v !== undefined);
   const avgRoundTrips = successful.map(r => r.avgRoundTripMs).filter(v => v !== undefined);
   const queryLatencies = successful.map(r => r.queryLatencyMs);
   const totalLatencies = successful.map(r => r.totalLatencyMs);
+  const mode = successful.length > 0 ? successful[0].mode : 'unknown';
 
   const calcStats = (arr) => ({
     min: Math.min(...arr).toFixed(2),
@@ -55,12 +76,16 @@ function calculateStats() {
 
   return {
     appType: APP_TYPE,
+    connectionMode: mode,
+    usePool: USE_POOL,
+    poolSize: USE_POOL ? POOL_SIZE : null,
     totalMeasurements: results.length,
     successfulMeasurements: successful.length,
     failedMeasurements: failed.length,
     failureRate: (failed.length / results.length * 100).toFixed(2) + '%',
     latency: {
-      connect: calcStats(connectLatencies),
+      connect: connectLatencies.length > 0 ? calcStats(connectLatencies) : null,
+      poolAcquire: poolAcquireLatencies.length > 0 ? calcStats(poolAcquireLatencies) : null,
       ping: pingLatencies.length > 0 ? calcStats(pingLatencies) : null,
       longQuery: longQueryLatencies.length > 0 ? calcStats(longQueryLatencies) : null,
       avgRoundTrip: avgRoundTrips.length > 0 ? calcStats(avgRoundTrips) : null,
@@ -81,20 +106,12 @@ function getUptime() {
   return `${hours}h ${minutes}m ${seconds}s`;
 }
 
-// Measure latency
-async function measureLatency() {
+// Measure latency using pg.Client (creates new connection each time)
+async function measureLatencyWithClient() {
   const start = process.hrtime.bigint();
 
   try {
-    // Parse the URL and ensure SSL is configured correctly
-    // Remove sslmode from URL and configure SSL explicitly
-    const dbUrl = DATABASE_URL.replace(/[?&]sslmode=[^&]*/g, '');
-    const client = new Client({
-      connectionString: dbUrl,
-      ssl: {
-        rejectUnauthorized: false,  // Accept DO's private CA
-      }
-    });
+    const client = new Client(getDbConfig());
 
     await client.connect();
     const connectTime = process.hrtime.bigint();
@@ -104,7 +121,6 @@ async function measureLatency() {
     const pingTime = process.hrtime.bigint();
 
     // Run a longer query that generates and returns data
-    // This better shows network throughput differences
     const longQuery = `
       SELECT
         gs.id,
@@ -127,30 +143,106 @@ async function measureLatency() {
 
     const measurement = {
       timestamp: new Date().toISOString(),
+      mode: 'client',
       connectLatencyMs: Number(connectTime - start) / 1e6,
       pingLatencyMs: Number(pingTime - connectTime) / 1e6,
       longQueryLatencyMs: Number(longQueryTime - pingTime) / 1e6,
       longQueryRows: queryResult.rowCount,
       multiRoundTripLatencyMs: Number(multiRoundTripTime - longQueryTime) / 1e6,
       avgRoundTripMs: Number(multiRoundTripTime - longQueryTime) / 1e6 / 10,
-      queryLatencyMs: Number(multiRoundTripTime - connectTime) / 1e6,  // Total query time
+      queryLatencyMs: Number(multiRoundTripTime - connectTime) / 1e6,
       totalLatencyMs: Number(multiRoundTripTime - start) / 1e6,
       success: true
     };
 
-    console.log(`[${APP_TYPE}] Benchmark: connect=${measurement.connectLatencyMs.toFixed(2)}ms, ping=${measurement.pingLatencyMs.toFixed(2)}ms, longQuery=${measurement.longQueryLatencyMs.toFixed(2)}ms (${measurement.longQueryRows} rows), 10x roundtrip=${measurement.multiRoundTripLatencyMs.toFixed(2)}ms (avg ${measurement.avgRoundTripMs.toFixed(2)}ms), total=${measurement.totalLatencyMs.toFixed(2)}ms`);
+    console.log(`[${APP_TYPE}] Client mode: connect=${measurement.connectLatencyMs.toFixed(2)}ms, ping=${measurement.pingLatencyMs.toFixed(2)}ms, longQuery=${measurement.longQueryLatencyMs.toFixed(2)}ms (${measurement.longQueryRows} rows), 10x roundtrip=${measurement.multiRoundTripLatencyMs.toFixed(2)}ms (avg ${measurement.avgRoundTripMs.toFixed(2)}ms), total=${measurement.totalLatencyMs.toFixed(2)}ms`);
 
     return measurement;
   } catch (error) {
-    const result = {
+    console.error(`[${APP_TYPE}] Client mode FAILED: ${error.message}`);
+    return {
       timestamp: new Date().toISOString(),
+      mode: 'client',
       error: error.message,
       success: false
     };
+  }
+}
 
-    console.error(`[${APP_TYPE}] Benchmark FAILED: ${error.message}`);
+// Measure latency using pg.Pool (reuses persistent connections)
+async function measureLatencyWithPool() {
+  const start = process.hrtime.bigint();
 
-    return result;
+  try {
+    // Get a client from the pool (this is the key metric for pooled connections)
+    const client = await pool.connect();
+    const acquireTime = process.hrtime.bigint();
+
+    // Run a simple ping query
+    await client.query('SELECT 1');
+    const pingTime = process.hrtime.bigint();
+
+    // Run a longer query that generates and returns data
+    const longQuery = `
+      SELECT
+        gs.id,
+        md5(random()::text) as hash1,
+        md5(random()::text) as hash2,
+        md5(random()::text) as hash3,
+        now() as timestamp
+      FROM generate_series(1, 1000) as gs(id)
+    `;
+    const queryResult = await client.query(longQuery);
+    const longQueryTime = process.hrtime.bigint();
+
+    // Run multiple round trips to measure sustained latency
+    for (let i = 0; i < 10; i++) {
+      await client.query('SELECT $1::int', [i]);
+    }
+    const multiRoundTripTime = process.hrtime.bigint();
+
+    // Release client back to pool (NOT disconnect)
+    client.release();
+
+    const measurement = {
+      timestamp: new Date().toISOString(),
+      mode: 'pool',
+      poolAcquireMs: Number(acquireTime - start) / 1e6,  // Time to get connection from pool
+      pingLatencyMs: Number(pingTime - acquireTime) / 1e6,
+      longQueryLatencyMs: Number(longQueryTime - pingTime) / 1e6,
+      longQueryRows: queryResult.rowCount,
+      multiRoundTripLatencyMs: Number(multiRoundTripTime - longQueryTime) / 1e6,
+      avgRoundTripMs: Number(multiRoundTripTime - longQueryTime) / 1e6 / 10,
+      queryLatencyMs: Number(multiRoundTripTime - acquireTime) / 1e6,  // Total query time (excludes acquire)
+      totalLatencyMs: Number(multiRoundTripTime - start) / 1e6,
+      poolStats: {
+        total: pool.totalCount,
+        idle: pool.idleCount,
+        waiting: pool.waitingCount
+      },
+      success: true
+    };
+
+    console.log(`[${APP_TYPE}] Pool mode: acquire=${measurement.poolAcquireMs.toFixed(2)}ms, ping=${measurement.pingLatencyMs.toFixed(2)}ms, longQuery=${measurement.longQueryLatencyMs.toFixed(2)}ms (${measurement.longQueryRows} rows), 10x roundtrip=${measurement.multiRoundTripLatencyMs.toFixed(2)}ms (avg ${measurement.avgRoundTripMs.toFixed(2)}ms), total=${measurement.totalLatencyMs.toFixed(2)}ms [pool: ${pool.totalCount}/${POOL_SIZE}]`);
+
+    return measurement;
+  } catch (error) {
+    console.error(`[${APP_TYPE}] Pool mode FAILED: ${error.message}`);
+    return {
+      timestamp: new Date().toISOString(),
+      mode: 'pool',
+      error: error.message,
+      success: false
+    };
+  }
+}
+
+// Main measurement function (chooses mode based on USE_POOL)
+async function measureLatency() {
+  if (USE_POOL) {
+    return measureLatencyWithPool();
+  } else {
+    return measureLatencyWithClient();
   }
 }
 
@@ -189,6 +281,9 @@ app.get('/metrics/summary', (req, res) => {
 
   // Format as text for easy reading
   let text = `=== ${APP_TYPE} App Benchmark Summary ===\n\n`;
+  text += `Connection Mode: ${stats.connectionMode || 'unknown'}\n`;
+  text += `Use Pool: ${stats.usePool}\n`;
+  if (stats.poolSize) text += `Pool Size: ${stats.poolSize}\n`;
   text += `Start Time: ${stats.startTime}\n`;
   text += `Uptime: ${stats.uptime}\n`;
   text += `Total Measurements: ${stats.totalMeasurements}\n`;
@@ -208,12 +303,13 @@ app.get('/metrics/summary', (req, res) => {
   };
 
   if (stats.latency) {
-    text += formatLatency('Connect Latency', stats.latency.connect);
+    text += formatLatency('Connect Latency (Client mode only)', stats.latency.connect);
+    text += formatLatency('Pool Acquire (Pool mode only)', stats.latency.poolAcquire);
     text += formatLatency('Ping (SELECT 1)', stats.latency.ping);
     text += formatLatency('Long Query (1000 rows)', stats.latency.longQuery);
     text += formatLatency('Avg Round Trip (10x queries)', stats.latency.avgRoundTrip);
     text += formatLatency('Total Query Time', stats.latency.query);
-    text += formatLatency('Total (Connect + All Queries)', stats.latency.total);
+    text += formatLatency('Total (Connect/Acquire + All Queries)', stats.latency.total);
   } else {
     text += `No successful measurements yet.\n`;
   }
@@ -499,11 +595,41 @@ app.get('/test-outbound', async (req, res) => {
   res.json(results);
 });
 
+// Initialize pool if USE_POOL is enabled
+async function initializePool() {
+  if (USE_POOL) {
+    console.log(`[${APP_TYPE}] Initializing connection pool (size: ${POOL_SIZE})...`);
+    pool = new Pool(getDbConfig());
+
+    // Handle pool errors
+    pool.on('error', (err) => {
+      console.error(`[${APP_TYPE}] Pool error:`, err.message);
+    });
+
+    // Test the pool connection
+    try {
+      const client = await pool.connect();
+      await client.query('SELECT 1');
+      client.release();
+      console.log(`[${APP_TYPE}] Pool initialized and tested successfully`);
+    } catch (error) {
+      console.error(`[${APP_TYPE}] Pool initialization failed:`, error.message);
+    }
+  }
+}
+
 // Start server
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   console.log(`[${APP_TYPE}] Server running on port ${PORT}`);
   console.log(`[${APP_TYPE}] Database URL configured: ${DATABASE_URL ? 'Yes' : 'No'}`);
+  console.log(`[${APP_TYPE}] Connection mode: ${USE_POOL ? 'POOL' : 'CLIENT'}`);
+  if (USE_POOL) {
+    console.log(`[${APP_TYPE}] Pool size: ${POOL_SIZE}`);
+  }
   console.log(`[${APP_TYPE}] Starting benchmark (every ${BENCHMARK_INTERVAL / 1000}s)...`);
+
+  // Initialize pool if needed
+  await initializePool();
 
   // Run initial benchmark
   runBenchmark();
